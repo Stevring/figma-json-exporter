@@ -1,0 +1,239 @@
+const UI_WIDTH = 720;
+const UI_HEIGHT = 520;
+
+figma.showUI(__html__, { width: UI_WIDTH, height: UI_HEIGHT, themeColors: true });
+
+const EXPORT_FIELDS = [
+  // Identity & structure
+  "id",
+  "name",
+  "type",
+  "visible",
+  "locked",
+  "constraints",
+  "layoutAlign",
+  "layoutGrow",
+  "x",
+  "y",
+  "width",
+  "height",
+  "rotation",
+  "clipsContent",
+
+  // Layout (Auto Layout)
+  "layoutMode",
+  "primaryAxisAlignItems",
+  "counterAxisAlignItems",
+  "primaryAxisSizingMode",
+  "counterAxisSizingMode",
+  "itemSpacing",
+  "paddingLeft",
+  "paddingRight",
+  "paddingTop",
+  "paddingBottom",
+  "layoutWrap",
+  "counterAxisSpacing",
+  "counterAxisAlignContent",
+
+  // Resizing
+  "layoutPositioning",
+  "minWidth",
+  "minHeight",
+  "maxWidth",
+  "maxHeight",
+  "layoutSizingHorizontal",
+  "layoutSizingVertical",
+
+  // Geometry & styling
+  "fills",
+  "strokes",
+  "cornerRadius",
+  "rectangleCornerRadii",
+  "opacity",
+  "effects",
+
+  // Text
+  "characters",
+  "textAlignHorizontal",
+  "textAlignVertical",
+  "textAutoResize",
+  "fontName",
+  "fontSize",
+  "textDecoration"
+] as const;
+
+type ExportField = (typeof EXPORT_FIELDS)[number];
+
+function formatDateForFilename(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  const mm = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const hh = pad(date.getHours());
+  const min = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  return `${yyyy}-${mm}${dd}-${hh}${min}${ss}`;
+}
+
+function sanitizeValue(value: unknown): unknown {
+  if (value === figma.mixed) return "MIXED";
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  if (typeof value === "symbol") return value.toString();
+  if (Array.isArray(value)) {
+    const sanitizedItems = value
+      .map(sanitizeValue)
+      .filter((item) => item !== undefined && item !== null);
+    return sanitizedItems.length ? sanitizedItems : undefined;
+  }
+  if (typeof value === "object") {
+    if ("visible" in (value as Record<string, unknown>) && (value as { visible?: boolean }).visible === false) {
+      return undefined;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      const sanitized = sanitizeValue(val);
+      if (sanitized !== undefined) out[key] = sanitized;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  return value;
+}
+
+function isRgbColor(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const obj = value as { r?: unknown; g?: unknown; b?: unknown };
+  return typeof obj.r === "number" && typeof obj.g === "number" && typeof obj.b === "number";
+}
+
+function rgbaToHex(color: { r: number; g: number; b: number }, opacity?: number): string {
+  const clamp = (n: number) => Math.max(0, Math.min(1, n));
+  const toHex = (n: number) => Math.round(clamp(n) * 255).toString(16).padStart(2, "0");
+  const alpha = typeof opacity === "number" ? opacity : 1;
+  return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}${toHex(alpha)}`.toUpperCase();
+}
+
+function addColorVariableName(
+  paint: Paint,
+  sanitized: Record<string, unknown>
+): Record<string, unknown> {
+  const bound = (paint as { boundVariables?: { color?: VariableAlias } }).boundVariables;
+  if (!bound || !bound.color || !("id" in bound.color)) return sanitized;
+  const variable = figma.variables.getVariableById(bound.color.id);
+  if (!variable) return sanitized;
+
+  const color = (sanitized.color as Record<string, unknown>) || {};
+  const nextColor = Object.assign({}, color, { colorVariableName: variable.name });
+  return Object.assign({}, sanitized, { color: nextColor });
+}
+
+function sanitizePaints(value: unknown): unknown {
+  if (value === figma.mixed) return "MIXED";
+  if (!Array.isArray(value)) return sanitizeValue(value);
+  const paints = value as Paint[];
+  const sanitizedItems = paints
+    .map((paint) => {
+      const sanitized = sanitizeValue(paint);
+      if (!sanitized || typeof sanitized !== "object") return sanitized;
+
+      const paintRecord = sanitized as Record<string, unknown>;
+      if (paint && "color" in paint && isRgbColor(paint.color)) {
+        paintRecord.color = { hexRGBA: rgbaToHex(paint.color as { r: number; g: number; b: number }, paint.opacity) };
+      }
+
+      const withName = addColorVariableName(paint, paintRecord);
+      if (withName && typeof withName === "object" && "boundVariables" in withName) {
+        const cleaned = Object.assign({}, withName as Record<string, unknown>);
+        delete cleaned.boundVariables;
+        return cleaned;
+      }
+      return withName;
+    })
+    .filter((item) => item !== undefined && item !== null);
+  return sanitizedItems.length ? sanitizedItems : undefined;
+}
+
+function hasOwn(node: SceneNode, key: ExportField): boolean {
+  return key in node && (node as Record<string, unknown>)[key] !== undefined;
+}
+
+function exportNode(node: SceneNode, includeChildren: boolean): Record<string, unknown> | null {
+  if (node.visible === false) return null;
+  const data: Record<string, unknown> = {};
+  for (const key of EXPORT_FIELDS) {
+    if (hasOwn(node, key)) {
+      const raw = (node as Record<string, unknown>)[key];
+      const value =
+        key === "fills" || key === "strokes" ? sanitizePaints(raw) : sanitizeValue(raw);
+      if (value !== undefined) data[key] = value;
+    }
+  }
+
+  if ("textStyleId" in node && node.textStyleId && node.textStyleId !== figma.mixed) {
+    const style = figma.getStyleById(node.textStyleId as string);
+    if (style && style.name) {
+      data.textVariableName = style.name;
+    }
+  }
+
+  if (includeChildren && "children" in node) {
+    const parent = node as BaseNode & ChildrenMixin;
+    const children = parent.children
+      .map((child) => exportNode(child, true))
+      .filter((child): child is Record<string, unknown> => child !== null);
+    if (children.length) data.children = children;
+  }
+
+  return Object.keys(data).length ? data : null;
+}
+
+function getSelectedNode(): SceneNode | null {
+  const selection = figma.currentPage.selection;
+  if (!selection || selection.length === 0) return null;
+  return selection[0];
+}
+
+function sendExport(includeChildren: boolean): void {
+  const node = getSelectedNode();
+  if (!node) {
+    figma.ui.postMessage({
+      type: "exportResult",
+      jsonString: "",
+      nodeName: "",
+      fileName: "",
+      warning: "No node selected. Please select a single node."
+    });
+    return;
+  }
+
+  const exported = exportNode(node, includeChildren) || {};
+  const jsonString = JSON.stringify(exported, null, 2);
+  const safeName = (node.name || "node").replace(/[\\/:*?"<>|]+/g, "-");
+  const stamp = formatDateForFilename(new Date());
+  const fileName = `figma-${safeName}-${stamp}.json`;
+
+  figma.ui.postMessage({
+    type: "exportResult",
+    jsonString,
+    nodeName: node.name || "node",
+    fileName
+  });
+}
+
+figma.ui.onmessage = (msg: { type?: string; message?: string; width?: number; height?: number }) => {
+  if (!msg || !msg.type) return;
+  if (msg.type === "export") {
+    sendExport(true);
+  } else if (msg.type === "exportParent") {
+    sendExport(false);
+  } else if (msg.type === "notify") {
+    if (msg.message) figma.notify(msg.message);
+  } else if (msg.type === "resize") {
+    const rawWidth = msg.width == null ? UI_WIDTH : msg.width;
+    const rawHeight = msg.height == null ? UI_HEIGHT : msg.height;
+    const width = Math.max(360, Math.round(rawWidth));
+    const height = Math.max(240, Math.round(rawHeight));
+    figma.ui.resize(width, height);
+  }
+};
