@@ -114,13 +114,13 @@ function rgbaToHex(color: { r: number; g: number; b: number }, opacity?: number)
   return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}${toHex(alpha)}`.toUpperCase();
 }
 
-function addColorVariableName(
+async function addColorVariableName(
   paint: Paint,
   sanitized: Record<string, unknown>
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const bound = (paint as { boundVariables?: { color?: VariableAlias } }).boundVariables;
   if (!bound || !bound.color || !("id" in bound.color)) return sanitized;
-  const variable = figma.variables.getVariableById(bound.color.id);
+  const variable = await figma.variables.getVariableByIdAsync(bound.color.id);
   if (!variable) return sanitized;
 
   const color = (sanitized.color as Record<string, unknown>) || {};
@@ -128,12 +128,12 @@ function addColorVariableName(
   return Object.assign({}, sanitized, { color: nextColor });
 }
 
-function sanitizePaints(value: unknown): unknown {
+async function sanitizePaints(value: unknown): Promise<unknown> {
   if (value === figma.mixed) return "MIXED";
   if (!Array.isArray(value)) return sanitizeValue(value);
   const paints = value as Paint[];
-  const sanitizedItems = paints
-    .map((paint) => {
+  const sanitizedItems = await Promise.all(
+    paints.map(async (paint) => {
       const sanitized = sanitizeValue(paint);
       if (!sanitized || typeof sanitized !== "object") return sanitized;
 
@@ -142,7 +142,7 @@ function sanitizePaints(value: unknown): unknown {
         paintRecord.color = { hexRGBA: rgbaToHex(paint.color as { r: number; g: number; b: number }, paint.opacity) };
       }
 
-      const withName = addColorVariableName(paint, paintRecord);
+      const withName = await addColorVariableName(paint, paintRecord);
       if (withName && typeof withName === "object" && "boundVariables" in withName) {
         const cleaned = Object.assign({}, withName as Record<string, unknown>);
         delete cleaned.boundVariables;
@@ -150,28 +150,29 @@ function sanitizePaints(value: unknown): unknown {
       }
       return withName;
     })
-    .filter((item) => item !== undefined && item !== null);
-  return sanitizedItems.length ? sanitizedItems : undefined;
+  );
+  const filtered = sanitizedItems.filter((item) => item !== undefined && item !== null);
+  return filtered.length ? filtered : undefined;
 }
 
 function hasOwn(node: SceneNode, key: ExportField): boolean {
   return key in node && (node as Record<string, unknown>)[key] !== undefined;
 }
 
-function exportNode(node: SceneNode, includeChildren: boolean): Record<string, unknown> | null {
+async function exportNode(node: SceneNode, includeChildren: boolean): Promise<Record<string, unknown> | null> {
   if (node.visible === false) return null;
   const data: Record<string, unknown> = {};
   for (const key of EXPORT_FIELDS) {
     if (hasOwn(node, key)) {
       const raw = (node as Record<string, unknown>)[key];
       const value =
-        key === "fills" || key === "strokes" ? sanitizePaints(raw) : sanitizeValue(raw);
+        key === "fills" || key === "strokes" ? await sanitizePaints(raw) : sanitizeValue(raw);
       if (value !== undefined) data[key] = value;
     }
   }
 
   if ("textStyleId" in node && node.textStyleId && node.textStyleId !== figma.mixed) {
-    const style = figma.getStyleById(node.textStyleId as string);
+    const style = await figma.getStyleByIdAsync(node.textStyleId as string);
     if (style && style.name) {
       data.textVariableName = style.name;
     }
@@ -179,9 +180,8 @@ function exportNode(node: SceneNode, includeChildren: boolean): Record<string, u
 
   if (includeChildren && "children" in node) {
     const parent = node as BaseNode & ChildrenMixin;
-    const children = parent.children
-      .map((child) => exportNode(child, true))
-      .filter((child): child is Record<string, unknown> => child !== null);
+    const childrenResults = await Promise.all(parent.children.map((child) => exportNode(child, true)));
+    const children = childrenResults.filter((child): child is Record<string, unknown> => child !== null);
     if (children.length) data.children = children;
   }
 
@@ -194,7 +194,7 @@ function getSelectedNode(): SceneNode | null {
   return selection[0];
 }
 
-function sendExport(includeChildren: boolean): void {
+async function sendExport(includeChildren: boolean): Promise<void> {
   const node = getSelectedNode();
   if (!node) {
     figma.ui.postMessage({
@@ -207,7 +207,7 @@ function sendExport(includeChildren: boolean): void {
     return;
   }
 
-  const exported = exportNode(node, includeChildren) || {};
+  const exported = (await exportNode(node, includeChildren)) || {};
   const jsonString = JSON.stringify(exported, null, 2);
   const safeName = (node.name || "node").replace(/[\\/:*?"<>|]+/g, "-");
   const stamp = formatDateForFilename(new Date());
@@ -221,19 +221,40 @@ function sendExport(includeChildren: boolean): void {
   });
 }
 
-figma.ui.onmessage = (msg: { type?: string; message?: string; width?: number; height?: number }) => {
+function formatError(error: unknown): string {
+  if (!error) return "Unknown error";
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch (err) {
+    return String(error);
+  }
+}
+
+figma.ui.onmessage = async (msg: { type?: string; message?: string; width?: number; height?: number }) => {
   if (!msg || !msg.type) return;
-  if (msg.type === "export") {
-    sendExport(true);
-  } else if (msg.type === "exportParent") {
-    sendExport(false);
-  } else if (msg.type === "notify") {
-    if (msg.message) figma.notify(msg.message);
-  } else if (msg.type === "resize") {
-    const rawWidth = msg.width == null ? UI_WIDTH : msg.width;
-    const rawHeight = msg.height == null ? UI_HEIGHT : msg.height;
-    const width = Math.max(360, Math.round(rawWidth));
-    const height = Math.max(240, Math.round(rawHeight));
-    figma.ui.resize(width, height);
+  try {
+    if (msg.type === "export") {
+      await sendExport(true);
+    } else if (msg.type === "exportParent") {
+      await sendExport(false);
+    } else if (msg.type === "notify") {
+      if (msg.message) figma.notify(msg.message);
+    } else if (msg.type === "resize") {
+      const rawWidth = msg.width == null ? UI_WIDTH : msg.width;
+      const rawHeight = msg.height == null ? UI_HEIGHT : msg.height;
+      const width = Math.max(360, Math.round(rawWidth));
+      const height = Math.max(240, Math.round(rawHeight));
+      figma.ui.resize(width, height);
+    }
+  } catch (error) {
+    figma.ui.postMessage({
+      type: "exportResult",
+      jsonString: "",
+      nodeName: "",
+      fileName: "",
+      warning: formatError(error)
+    });
   }
 };

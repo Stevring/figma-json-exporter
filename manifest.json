@@ -1,11 +1,12 @@
 {
   "name": "figma-json-exporter",
-  "id": "figma-json-exporter",
+  "id": "1599619521498099673",
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "dist/ui.html",
   "editorType": ["figma"],
   "networkAccess": {
     "allowedDomains": ["none"]
-  }
+  },
+  "documentAccess": "dynamic-page"
 }
