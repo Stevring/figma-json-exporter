@@ -28,6 +28,7 @@ This repo contains a Figma plugin that exports selected node properties to JSON 
 - Figma runtime does not support newer JS syntax like nullish coalescing (`??`) or object spread (`...`).
   - Any usage caused syntax errors in Figma console.
   - Code was updated to use compatible `||` / explicit checks and `Object.assign` instead.
+  - The serializer avoids object spread when adding `colorVariableName`.
 - UI rendering issue:
   - Figma `showUI(__html__)` requires HTML string. The build now inlines `ui.js` into `ui.html`, then embeds that HTML into `__html__` in `code.js`.
 
