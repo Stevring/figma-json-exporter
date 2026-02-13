@@ -63,6 +63,12 @@ const EXPORT_FIELDS = [
 ] as const;
 
 type ExportField = (typeof EXPORT_FIELDS)[number];
+const MIXED_CORNER_KEYS = [
+  "topLeftRadius",
+  "topRightRadius",
+  "bottomLeftRadius",
+  "bottomRightRadius"
+] as const;
 
 function formatDateForFilename(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -165,6 +171,16 @@ async function exportNode(node: SceneNode, includeChildren: boolean): Promise<Re
   for (const key of EXPORT_FIELDS) {
     if (hasOwn(node, key)) {
       const raw = (node as Record<string, unknown>)[key];
+      if (key === "cornerRadius" && raw === figma.mixed) {
+        for (const cornerKey of MIXED_CORNER_KEYS) {
+          const cornerValue = (node as Record<string, unknown>)[cornerKey];
+          const sanitizedCorner = sanitizeValue(cornerValue);
+          if (sanitizedCorner !== undefined && sanitizedCorner !== "MIXED") {
+            data[cornerKey] = sanitizedCorner;
+          }
+        }
+        continue;
+      }
       const value =
         key === "fills" || key === "strokes" ? await sanitizePaints(raw) : sanitizeValue(raw);
       if (value !== undefined) data[key] = value;
